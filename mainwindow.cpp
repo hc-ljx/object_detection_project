@@ -7,29 +7,53 @@ MainWindow::MainWindow(QWidget *parent)
     , weightsPath(QDir::cleanPath(QApplication::applicationDirPath() + "/../../models/yolov4.weights"))
     , configPath(QDir::cleanPath(QApplication::applicationDirPath() + "/../../models/yolov4.cfg"))
     , isCameraRunning(false)
+    , cameraTimer(new QTimer(this))
+    , processorThread(new QThread(this))
+    , frameProcessor(new FrameProcessor())
 {
     ui->setupUi(this);
 
-    // 创建定时器
-    cameraTimer = new QTimer(this);
-    connect(cameraTimer, &QTimer::timeout, this, &MainWindow::processCameraFrame);
+    // 设置帧处理器
+    frameProcessor->setDetector(&detector);
+    frameProcessor->moveToThread(processorThread);
 
     // 连接信号和槽
+    connect(cameraTimer, &QTimer::timeout, this, &MainWindow::processCameraFrame);
+    connect(frameProcessor, &FrameProcessor::frameProcessed, this, &MainWindow::onFrameProcessed);
+    connect(processorThread, &QThread::started, frameProcessor, &FrameProcessor::startProcessing);
+    connect(processorThread, &QThread::finished, frameProcessor, &FrameProcessor::deleteLater);
+
+    // 启动处理器线程
+    processorThread->start();
+
+    // 连接UI信号和槽
     connect(ui->loadButton, &QPushButton::clicked, this, &MainWindow::onLoadImage);
     connect(ui->detectButton, &QPushButton::clicked, this, &MainWindow::onDetectObjects);
     connect(ui->saveButton, &QPushButton::clicked, this, &MainWindow::onSaveResult);
-
-    // 新增按钮连接（需要在UI中添加这些按钮）
     connect(ui->cameraStartButton, &QPushButton::clicked, this, &MainWindow::onCameraStart);
     connect(ui->cameraStopButton, &QPushButton::clicked, this, &MainWindow::onCameraStop);
 
-    // 加载模型（需要下载YOLO模型文件）
+    // 加载模型
     detector.loadModel(weightsPath.toStdString(), configPath.toStdString());
 
     setWindowTitle("物体识别应用 - 摄像头检测");
 }
 
 MainWindow::~MainWindow() {
+    if (isCameraRunning) {
+        onCameraStop();
+    }
+
+    // 停止处理器
+    frameProcessor->stopProcessing();
+
+    // 停止线程
+    processorThread->quit();
+    if (!processorThread->wait(2000)) { // 等待2秒
+        processorThread->terminate(); // 强制终止
+        processorThread->wait();
+    }
+
     if (videoCapture.isOpened()) {
         videoCapture.release();
     }
@@ -41,19 +65,25 @@ void MainWindow::onCameraStart() {
         return;
     }
 
-    // 尝试打开摄像头（0通常是默认摄像头）
     if (!videoCapture.open(0)) {
         QMessageBox::warning(this, "错误", "无法打开摄像头");
         return;
     }
 
-    // 设置摄像头参数（可选）
-    videoCapture.set(cv::CAP_PROP_FRAME_WIDTH, 640);
-    videoCapture.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
-    videoCapture.set(cv::CAP_PROP_FPS, 30);
+    // 使用适中的分辨率
+    videoCapture.set(cv::CAP_PROP_FRAME_WIDTH, 480);
+    videoCapture.set(cv::CAP_PROP_FRAME_HEIGHT, 360);
+    videoCapture.set(cv::CAP_PROP_FPS, 15);
 
     isCameraRunning = true;
-    cameraTimer->start(33); // 约30fps，每33毫秒一帧
+
+    // 清空之前的帧
+    {
+        QMutexLocker locker(&frameMutex);
+        lastProcessedFrame = cv::Mat();
+    }
+
+    cameraTimer->start(66); // 15fps的采集，给处理留出时间
 
     ui->statusLabel->setText("摄像头运行中...");
 }
@@ -83,19 +113,8 @@ void MainWindow::processCameraFrame() {
     cv::Mat frame;
     if (videoCapture.read(frame)) {
         if (!frame.empty()) {
-            // 进行物体检测
-            auto detections = detector.detect(frame);
-
-            // 绘制检测结果
-            cv::Mat resultFrame = frame.clone();
-            drawDetections(resultFrame, detections);
-
-            // 显示结果
-            displayImage(resultFrame);
-
-            // 更新状态
-            QString status = QString("检测到 %1 个物体 | 摄像头运行中").arg(detections.size());
-            ui->statusLabel->setText(status);
+            // 发送到工作线程处理
+            frameProcessor->processFrame(frame);
         }
     } else {
         QMessageBox::warning(this, "错误", "无法读取摄像头帧");
@@ -103,7 +122,29 @@ void MainWindow::processCameraFrame() {
     }
 }
 
-// 原有的其他函数保持不变
+void MainWindow::onFrameProcessed(const ProcessedFrame& result) {
+    if (result.isValid) {
+        QMutexLocker locker(&frameMutex);
+
+        // 保存处理后的帧
+        lastProcessedFrame = result.frame.clone();
+        drawDetections(lastProcessedFrame, result.detections);
+
+        // 统一在这里显示帧
+        displayImage(lastProcessedFrame);
+
+        // 更新状态
+        QString status = QString("检测到 %1 个物体 | 摄像头运行中").arg(result.detections.size());
+        ui->statusLabel->setText(status);
+    } else {
+        // 如果处理失败，至少显示原始帧保持流畅
+        QMutexLocker locker(&frameMutex);
+        if (!lastProcessedFrame.empty()) {
+            displayImage(lastProcessedFrame);
+        }
+    }
+}
+
 void MainWindow::onLoadImage() {
     // 如果摄像头在运行，先停止
     if (isCameraRunning) {
@@ -160,13 +201,10 @@ void MainWindow::onSaveResult() {
 
     if (!fileName.isEmpty()) {
         // 如果是摄像头模式，保存当前显示的帧
-        if (isCameraRunning && videoCapture.isOpened()) {
-            cv::Mat currentFrame;
-            videoCapture.read(currentFrame);
-            if (!currentFrame.empty()) {
-                auto detections = detector.detect(currentFrame);
-                drawDetections(currentFrame, detections);
-                cv::imwrite(fileName.toStdString(), currentFrame);
+        if (isCameraRunning) {
+            QMutexLocker locker(&frameMutex);
+            if (!lastProcessedFrame.empty()) {
+                cv::imwrite(fileName.toStdString(), lastProcessedFrame);
             }
         } else {
             cv::imwrite(fileName.toStdString(), resultImage);
@@ -175,7 +213,6 @@ void MainWindow::onSaveResult() {
     }
 }
 
-// 原有的displayImage、drawDetections、cvMatToQImage函数保持不变
 void MainWindow::displayImage(const cv::Mat& image) {
     QImage qimage = cvMatToQImage(image);
     QPixmap pixmap = QPixmap::fromImage(qimage);

@@ -1,5 +1,4 @@
-#ifndef MAINWINDOW_H
-#define MAINWINDOW_H
+#pragma once
 
 #include <QMainWindow>
 #include <QImage>
@@ -7,8 +6,9 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QTimer>
+#include <QThread>
 #include "ObjectDetector.h"
-
+#include "FrameProcessor.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -23,7 +23,6 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-
 private slots:
     void onLoadImage();
     void onDetectObjects();
@@ -31,24 +30,28 @@ private slots:
     void onCameraStart();  // 新增：启动摄像头
     void onCameraStop();   // 新增：停止摄像头
     void processCameraFrame(); // 新增：处理摄像头帧
+    void onFrameProcessed(const ProcessedFrame& result); // 新增：处理完成的帧
 
 private:
     Ui::MainWindow *ui;
     ObjectDetector detector;
     cv::Mat currentImage;
     cv::Mat resultImage;
-    cv::VideoCapture videoCapture; // 新增：摄像头捕获对象
-    QTimer *cameraTimer;           // 新增：定时器用于实时更新
+    cv::VideoCapture videoCapture;
+    QTimer *cameraTimer;
 
-    // 使用应用程序所在目录的路径
+    // 多线程处理
+    QThread* processorThread;
+    FrameProcessor* frameProcessor;
+    cv::Mat lastProcessedFrame; // 最后处理完成的帧
+
     QString weightsPath;
     QString configPath;
 
-    bool isCameraRunning;  // 新增：摄像头状态标志
+    bool isCameraRunning;
+    QMutex frameMutex;
 
     void displayImage(const cv::Mat& image);
     void drawDetections(cv::Mat& image, const std::vector<DetectionResult>& detections);
     QImage cvMatToQImage(const cv::Mat& mat);
 };
-
-#endif // MAINWINDOW_H

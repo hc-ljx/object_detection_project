@@ -32,7 +32,9 @@ set(UI_FILES
 )
 
 # 创建可执行文件
-add_executable(ObjectDetectionApp ${SOURCES} ${UI_FILES})
+add_executable(ObjectDetectionApp ${SOURCES} ${UI_FILES}
+    FrameProcessor.h
+    FrameProcessor.cpp)
 
 # 链接库
 target_link_libraries(ObjectDetectionApp PRIVATE
