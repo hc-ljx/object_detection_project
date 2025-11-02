@@ -22,7 +22,7 @@ void FrameProcessor::setDetector(ObjectDetector* detector)
 
 void FrameProcessor::processFrame(const cv::Mat& frame)
 {
-    if (!m_isProcessing) {
+    if (!m_isProcessing.load()) {  // 原子读取
         return;
     }
 
@@ -52,10 +52,7 @@ void FrameProcessor::startProcessing()
     m_stopRequested = false;
     m_isProcessing = true;
 
-    // 记录帧时间用于平滑处理
-    auto lastProcessTime = std::chrono::steady_clock::now();
-
-    while (!m_stopRequested) {
+    while (!m_stopRequested.load()) {
         cv::Mat frame;
         bool hasFrame = false;
 
@@ -90,19 +87,6 @@ void FrameProcessor::startProcessing()
                     qWarning() << "Frame processing error:" << e.what();
                 }
             }
-
-            // 计算处理时间并适当延迟，保持稳定帧率
-            auto currentTime = std::chrono::steady_clock::now();
-            auto processDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                currentTime - lastProcessTime);
-
-            // 目标帧率：15fps ≈ 66ms/帧
-            const int targetFrameTime = 66; // ms
-            if (processDuration.count() < targetFrameTime) {
-                QThread::msleep(targetFrameTime - processDuration.count());
-            }
-
-            lastProcessTime = std::chrono::steady_clock::now();
         }
     }
 

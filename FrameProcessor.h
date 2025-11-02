@@ -39,8 +39,9 @@ private:
     QMutex m_mutex;
     QWaitCondition m_condition;
     std::vector<cv::Mat> m_frameQueue;
-    bool m_stopRequested;
-    bool m_isProcessing;
+    // 改为原子类型
+    std::atomic<bool> m_stopRequested{false};
+    std::atomic<bool> m_isProcessing{false};
 };
 
 
